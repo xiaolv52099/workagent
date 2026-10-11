@@ -50,6 +50,9 @@ class Usage:
 # 价格会调整，所以这里不写死猜测值，查不到就返回 None，不伪造数字。
 PRICES_CNY_PER_1K: dict[str, tuple[float, float]] = {
     # "模型名": (输入价, 输出价)
+    "qwen3.8-max": (0.012, 0.036),
+    "qwen3.8-flash": (0.0008, 0.0027),
+    "kimi-k3": (0.02, 0.1),
 }
 
 
@@ -248,6 +251,7 @@ class LLMClient:
         *,
         provider: Provider | None = None,
         temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         client, model, _ = self._resolve(provider, vision=True)
         messages: list[Message] = [
@@ -264,6 +268,7 @@ class LLMClient:
             model=model,
             messages=_to_sdk_messages(messages),
             temperature=temperature,
+            max_tokens=max_tokens,
         )
         latency_ms = (time.perf_counter() - started) * 1000
         choice = resp.choices[0]
