@@ -32,18 +32,53 @@ from .config import Provider, Settings, get_settings
 
 @dataclass
 class Usage:
-    """一次调用的 token 用量。OpenAI 兼容协议的 usage 字段就是这三个数。"""
+    """一次调用的 token 用量。
+
+    ⚠️ reasoning_tokens 必须单独记：推理模型（qwen3.8-max / flash 等）会先输出一段
+    思维链，这段内容**算在 completion_tokens 里、按输出价计费**，但在响应里被放在
+    delta.reasoning_content，不进 content。
+
+    实测（qwen3.8-flash）：「数 1 到 3，只输出数字。」这个请求
+        · 64 个分片里 59 个是 reasoning_content、2 个是 content
+        · 输出 78 token，最终可见内容只有 3 个字符 '123'
+    也就是说可见内容的真实成本被思维链放大了 20 倍以上。
+    不把这两者分开记，你的成本优化永远找不到真正的大头。
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    reasoning_tokens: int = 0
+
+    @property
+    def visible_tokens(self) -> int:
+        """扣掉思维链后的可见输出 token。provider 不返回明细时等于 completion_tokens。"""
+        return max(0, self.completion_tokens - self.reasoning_tokens)
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
             prompt_tokens=self.prompt_tokens + other.prompt_tokens,
             completion_tokens=self.completion_tokens + other.completion_tokens,
             total_tokens=self.total_tokens + other.total_tokens,
+            reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
         )
+
+
+def _usage_from(obj: Any) -> Usage:
+    """从 SDK 的 usage 对象构造 Usage。
+
+    集中一处做防御式取值：不是所有 provider 都返回
+    completion_tokens_details.reasoning_tokens，取不到就当 0。
+    """
+    if obj is None:
+        return Usage()
+    details = getattr(obj, "completion_tokens_details", None)
+    return Usage(
+        prompt_tokens=getattr(obj, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(obj, "completion_tokens", 0) or 0,
+        total_tokens=getattr(obj, "total_tokens", 0) or 0,
+        reasoning_tokens=(getattr(details, "reasoning_tokens", 0) or 0) if details else 0,
+    )
 
 
 # TODO(D1): 把下面的单价换成你在控制台查到的真实价格（单位：元 / 千 token）。
@@ -77,17 +112,31 @@ class ChatResult:
     usage: Usage
     latency_ms: float
     finish_reason: str | None = None
+    # 推理模型的思维链。默认不展示给用户，但必须留下来——
+    # 它既占成本（按输出 token 计费），又是排查「模型为什么答错」的第一手材料。
+    reasoning: str = ""
 
 
 @dataclass
 class StreamChunk:
     """流式响应的一个分片。
 
+    一个完整流通常长这样（三个阶段的字段是分开的）：
+
+        [delta 有内容] × N                      ← 正文（推理模型这里是 reasoning）
+        [delta 空, finish_reason="stop"]         ← 状态：正常结束
+        [choices=[], usage={...}]               ← 总账：用量
+
     注意：只有在 stream_options={"include_usage": True} 时，
     usage 才会出现在最后一个分片里（此时该分片 choices 为空）。
+
+    ⚠️ 不要假设这三个字段一定分片出现。不同 provider 的切法不同，
+    有的会把 finish_reason 和最后一段内容放在同一片。
+    所以消费方必须**每个分片都同时检查三个字段**，而不是"等第 N 片"。
     """
 
     delta: str = ""
+    reasoning: str = ""
     usage: Usage | None = None
     finish_reason: str | None = None
 
@@ -171,17 +220,13 @@ class LLMClient:
         latency_ms = (time.perf_counter() - started) * 1000
 
         choice = resp.choices[0]
-        u = resp.usage
         return ChatResult(
             text=choice.message.content or "",
             model=resp.model or model,
-            usage=Usage(
-                prompt_tokens=getattr(u, "prompt_tokens", 0) or 0,
-                completion_tokens=getattr(u, "completion_tokens", 0) or 0,
-                total_tokens=getattr(u, "total_tokens", 0) or 0,
-            ),
+            usage=_usage_from(resp.usage),
             latency_ms=latency_ms,
             finish_reason=choice.finish_reason,
+            reasoning=getattr(choice.message, "reasoning_content", None) or "",
         )
 
     # ------------------------------------------------------------------
@@ -218,20 +263,31 @@ class LLMClient:
         # 所以这里不需要 type: ignore。如果哪天升级 SDK 后报类型错误，先看返回类型再决定加不加。
         for chunk in client.chat.completions.create(**kwargs):
             delta = ""
+            reasoning = ""
             finish_reason: str | None = None
             if chunk.choices:
-                delta = chunk.choices[0].delta.content or ""
+                d = chunk.choices[0].delta
+                # 推理模型把思维链放在 reasoning_content，和正文分开。
+                # 只取 content 会把绝大多数输出 token 悄悄丢掉——
+                # 成本算不准、TTFT 也会被误读成「首字慢」。
+                delta = getattr(d, "content", None) or ""
+                reasoning = getattr(d, "reasoning_content", None) or ""
                 finish_reason = chunk.choices[0].finish_reason
 
-            usage_obj = getattr(chunk, "usage", None)
-            usage = None
-            if usage_obj is not None:
-                usage = Usage(
-                    prompt_tokens=getattr(usage_obj, "prompt_tokens", 0) or 0,
-                    completion_tokens=getattr(usage_obj, "completion_tokens", 0) or 0,
-                    total_tokens=getattr(usage_obj, "total_tokens", 0) or 0,
-                )
-            yield StreamChunk(delta=delta, usage=usage, finish_reason=finish_reason)
+            # usage 只可能在最后一个分片（此时 choices 为空）。
+            # 每个分片都检查，不要假设它出现在第 N 片。
+            usage = (
+                _usage_from(getattr(chunk, "usage", None))
+                if getattr(chunk, "usage", None)
+                else None
+            )
+
+            yield StreamChunk(
+                delta=delta,
+                reasoning=reasoning,
+                usage=usage,
+                finish_reason=finish_reason,
+            )
 
     # ------------------------------------------------------------------
     # 3) 视觉（图片输入）
@@ -272,17 +328,13 @@ class LLMClient:
         )
         latency_ms = (time.perf_counter() - started) * 1000
         choice = resp.choices[0]
-        u = resp.usage
         return ChatResult(
             text=choice.message.content or "",
             model=resp.model or model,
-            usage=Usage(
-                prompt_tokens=getattr(u, "prompt_tokens", 0) or 0,
-                completion_tokens=getattr(u, "completion_tokens", 0) or 0,
-                total_tokens=getattr(u, "total_tokens", 0) or 0,
-            ),
+            usage=_usage_from(resp.usage),
             latency_ms=latency_ms,
             finish_reason=choice.finish_reason,
+            reasoning=getattr(choice.message, "reasoning_content", None) or "",
         )
 
 

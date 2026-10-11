@@ -9,13 +9,59 @@
 from __future__ import annotations
 
 from agent_core.config import Settings
-from agent_core.llm import Usage, estimate_cost_cny, system_user
+from agent_core.llm import Usage, _usage_from, estimate_cost_cny, system_user
+
+
+class _FakeDetails:
+    def __init__(self, reasoning_tokens: int) -> None:
+        self.reasoning_tokens = reasoning_tokens
+
+
+class _FakeUsage:
+    """模拟 SDK 的 usage 对象（含推理模型才会有的 completion_tokens_details）。"""
+
+    def __init__(self, p: int, c: int, t: int, reasoning: int | None = None) -> None:
+        self.prompt_tokens = p
+        self.completion_tokens = c
+        self.total_tokens = t
+        if reasoning is not None:
+            self.completion_tokens_details = _FakeDetails(reasoning)
 
 
 def test_usage_addition() -> None:
     a = Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
     b = Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3)
     assert (a + b) == Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+
+
+def test_usage_addition_carries_reasoning_tokens() -> None:
+    """回归用例：加总时必须带上 reasoning_tokens。
+
+    漏掉这个字段会让多次调用的思维链成本悄悄消失——
+    而实测思维链占输出成本的 36%，不见了就是一笔糊涂账。
+    """
+    a = Usage(10, 20, 30, reasoning_tokens=12)
+    b = Usage(1, 2, 3, reasoning_tokens=1)
+    total = a + b
+    assert total.reasoning_tokens == 13
+    assert total.visible_tokens == 22 - 13
+
+
+def test_visible_tokens() -> None:
+    assert Usage(10, 100, 110, reasoning_tokens=60).visible_tokens == 40
+    # provider 不返回 reasoning 明细时，visible == completion，不能算成负数
+    assert Usage(10, 100, 110).visible_tokens == 100
+    # 脏数据保护：reasoning 比 completion 还大时不返回负数
+    assert Usage(10, 10, 20, reasoning_tokens=99).visible_tokens == 0
+
+
+def test_usage_from_handles_missing_details() -> None:
+    """不是所有 provider 都返回 completion_tokens_details，取不到就当 0。"""
+    assert _usage_from(None) == Usage()
+    assert _usage_from(_FakeUsage(5, 6, 11)).reasoning_tokens == 0
+    with_details = _usage_from(_FakeUsage(5, 6, 11, reasoning=4))
+    assert with_details.reasoning_tokens == 4
+    assert with_details.visible_tokens == 2
 
 
 def test_system_user_shape() -> None:
