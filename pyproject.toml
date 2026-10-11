@@ -1,0 +1,45 @@
+[project]
+name = "workagent"
+version = "0.1.0"
+description = "企业知识工作 Agent —— 把散落的文档变成可问答、可执行多步任务、且每步可追溯可评测的 Agent 工作台"
+readme = "README.md"
+# 关键：锁定 3.12/3.13。本机系统 Python 是 3.14.5，太新，
+# 后面要用的 numpy / asyncpg / 部分向量库和可观测 SDK 可能还没有 3.14 的 wheel。
+# uv 会自动下载并使用 3.12，不需要你手动装。
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "openai>=1.60",          # 用 OpenAI 兼容协议统一访问百炼 + 方舟
+    "pydantic>=2.9",         # 数据校验（D2 结构化输出的地基）
+    "pydantic-settings>=2.5",# 从环境变量读配置
+    "python-dotenv>=1.0",
+    "rich>=13.7",            # 终端里好看地打印流式输出和耗时
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",             # lint + format
+    "mypy>=1.11",            # 类型检查
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W=pycodestyle, F=pyflakes, I=isort, UP=pyupgrade, B=bugbear, SIM=simplify
+select = ["E", "W", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # 行长由 formatter 处理
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+# 下面的库还没带类型标注，先放过
+[[tool.mypy.overrides]]
+module = ["dotenv.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
