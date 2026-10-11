@@ -16,7 +16,7 @@ import base64
 import mimetypes
 import time
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -65,6 +65,30 @@ class Usage:
             total_tokens=self.total_tokens + other.total_tokens,
             reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
         )
+
+
+def _extract_tool_calls(message: Any) -> list[dict[str, Any]]:
+    """从 SDK 的 message 里取出 tool_calls，拍平成好用的 dict。
+
+    arguments 是**字符串**（模型输出的 JSON 文本），不是 dict——
+    这是新手最常搞错的一点：不 json.loads 直接当 dict 用会 TypeError。
+    这里刻意不做解析：解析失败也是一种需要被上层处理的结果，
+    提前吞掉异常会掩盖模型的格式错误。
+    """
+    calls = getattr(message, "tool_calls", None)
+    if not calls:
+        return []
+    out: list[dict[str, Any]] = []
+    for c in calls:
+        fn = getattr(c, "function", None)
+        out.append(
+            {
+                "id": getattr(c, "id", None),
+                "name": getattr(fn, "name", None) if fn else None,
+                "arguments": getattr(fn, "arguments", None) if fn else None,
+            }
+        )
+    return out
 
 
 def _usage_from(obj: Any) -> Usage:
@@ -118,6 +142,11 @@ class ChatResult:
     # 推理模型的思维链。默认不展示给用户，但必须留下来——
     # 它既占成本（按输出 token 计费），又是排查「模型为什么答错」的第一手材料。
     reasoning: str = ""
+    # 工具调用请求。⚠️ 走 tool calling 时，参数在 tool_calls.arguments 里，
+    # **不在 text 里**（实测：finish_reason=tool_calls、content 为空字符串）。
+    # 不提取它，D3 的 Agent 循环就拿不到模型想干什么。
+    # 每项形如 {"id": ..., "name": ..., "arguments": "<json 字符串>"}
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -243,6 +272,7 @@ class LLMClient:
             latency_ms=latency_ms,
             finish_reason=choice.finish_reason,
             reasoning=getattr(choice.message, "reasoning_content", None) or "",
+            tool_calls=_extract_tool_calls(choice.message),
         )
 
     # ------------------------------------------------------------------

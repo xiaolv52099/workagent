@@ -8,8 +8,50 @@
 
 from __future__ import annotations
 
+import json
+
 from agent_core.config import Settings
-from agent_core.llm import Usage, _usage_from, estimate_cost_cny, system_user
+from agent_core.llm import Usage, _extract_tool_calls, _usage_from, estimate_cost_cny, system_user
+
+
+class _FakeFunction:
+    def __init__(self, name: str, arguments: str) -> None:
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeToolCall:
+    def __init__(self, cid: str, name: str, arguments: str) -> None:
+        self.id = cid
+        self.function = _FakeFunction(name, arguments)
+
+
+class _FakeMessage:
+    def __init__(self, tool_calls: list[_FakeToolCall] | None = None) -> None:
+        if tool_calls is not None:
+            self.tool_calls = tool_calls
+
+
+def test_extract_tool_calls_empty() -> None:
+    """没有 tool_calls 字段、或字段为空时都要返回空列表，不能抛异常。"""
+    assert _extract_tool_calls(_FakeMessage()) == []
+    assert _extract_tool_calls(_FakeMessage([])) == []
+
+
+def test_extract_tool_calls_shape() -> None:
+    """回归用例：tool calling 时参数在 arguments 里，而且它是字符串。
+
+    实测走 tool calling 时 content 是空字符串，参数全在这里。
+    不提取它，D3 的 Agent 循环就拿不到模型想干什么。
+    """
+    msg = _FakeMessage([_FakeToolCall("call_1", "get_weather", '{"city":"北京"}')])
+    calls = _extract_tool_calls(msg)
+    assert len(calls) == 1
+    assert calls[0]["id"] == "call_1"
+    assert calls[0]["name"] == "get_weather"
+    # 刻意不做 json.loads：解析失败也要让上层看得见，不能提前吞掉
+    assert isinstance(calls[0]["arguments"], str)
+    assert json.loads(calls[0]["arguments"]) == {"city": "北京"}
 
 
 class _FakeDetails:
