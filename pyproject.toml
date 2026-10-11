@@ -22,6 +22,22 @@ dev = [
     "mypy>=1.11",            # 类型检查
 ]
 
+# ---------------------------------------------------------------------------
+# 让 agent_core 成为一个「可安装的包」
+#
+# 不加这段的话，uv sync 只装第三方依赖，src/ 不在 sys.path 上，
+# 你在 playground/ 里 `import agent_core` 会直接 ModuleNotFoundError。
+# 加上之后 uv sync 会把本包以「可编辑模式（editable）」装进虚拟环境，
+# 于是任何脚本、测试、FastAPI 应用都能统一写 `from agent_core.xxx import ...`，
+# 而且改源码立即生效，不用重装。
+# ---------------------------------------------------------------------------
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_core"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -42,4 +58,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# 注意：这里刻意不写 pythonpath = ["src"]。
+# 包已经通过 build-system 正确安装了，测试就应该走和线上一致的导入路径；
+# 用 pythonpath 打补丁会掩盖「包没装好」这类问题。
+
