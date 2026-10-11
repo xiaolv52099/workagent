@@ -18,9 +18,10 @@ import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
 from .config import Provider, Settings, get_settings
 
@@ -95,6 +96,17 @@ class StreamChunk:
 Message = dict[str, Any]
 
 
+def _to_sdk_messages(messages: Sequence[Message]) -> list[ChatCompletionMessageParam]:
+    """把我们宽松的 Message 转成 SDK 的严格类型。
+
+    为什么需要这一层：我们会在运行时动态拼消息（加 tool 结果、加图片块、加记忆），
+    用 dict 最方便；而 SDK 用的是很窄的 TypedDict 联合类型。
+    与其在每个调用点写 `# type: ignore`，不如在这里 cast 一次并说明原因——
+    类型忽略要集中、要有理由，散落各处就没人敢改了。
+    """
+    return cast("list[ChatCompletionMessageParam]", list(messages))
+
+
 class LLMClient:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -148,7 +160,7 @@ class LLMClient:
 
         resp = client.chat.completions.create(
             model=model,
-            messages=list(messages),  # type: ignore[arg-type]
+            messages=_to_sdk_messages(messages),
             temperature=temperature,
             max_tokens=max_tokens,
             **extra,
@@ -190,7 +202,7 @@ class LLMClient:
         client, model, _ = self._resolve(provider, vision=False)
         kwargs: dict[str, Any] = dict(
             model=model,
-            messages=list(messages),
+            messages=_to_sdk_messages(messages),
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
@@ -250,8 +262,8 @@ class LLMClient:
         started = time.perf_counter()
         resp = client.chat.completions.create(
             model=model,
-            messages=messages,
-            temperature=temperature,  # type: ignore[arg-type]
+            messages=_to_sdk_messages(messages),
+            temperature=temperature,
         )
         latency_ms = (time.perf_counter() - started) * 1000
         choice = resp.choices[0]
