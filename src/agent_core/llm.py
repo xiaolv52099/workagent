@@ -18,12 +18,15 @@ import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from .config import Provider, Settings, get_settings
+
+# 推理模型的思维链预算。取值由 SDK/协议定义，"none" 表示完全关闭。
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 # ---------------------------------------------------------------------------
 # 用量与成本
@@ -205,6 +208,18 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         provider: Provider | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        # reasoning_effort: 控制推理模型的思维链预算，provider 相关。
+        #   实测（百炼 / qwen3.8-flash，问题「用一句话说明什么是 CAP 定理」）：
+        #     不传        -> out=79, reasoning=41
+        #     "none"      -> out=39, reasoning=0   ← 完全关闭，成本降 51%
+        #     "low"       -> out=95, reasoning=53  ← 注意：反而更贵，别想当然
+        #   两个重要的实测事实：
+        #     1) max_tokens 不限制思维链。实测 max_tokens=4 时仍生成 347 个
+        #        reasoning token。所以「设 max_tokens 就有预算护栏」对推理模型是错的。
+        #     2) 关闭思维链的正确写法是 reasoning_effort 或
+        #        extra_body={"enable_thinking": False}；
+        #        直接传 enable_thinking=False 会被 SDK 拒绝。
         **extra: Any,
     ) -> ChatResult:
         client, model, _ = self._resolve(provider, vision=False)
@@ -215,6 +230,7 @@ class LLMClient:
             messages=_to_sdk_messages(messages),
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
             **extra,
         )
         latency_ms = (time.perf_counter() - started) * 1000
@@ -240,6 +256,18 @@ class LLMClient:
         max_tokens: int | None = None,
         provider: Provider | None = None,
         include_usage: bool = True,
+        reasoning_effort: ReasoningEffort | None = None,
+        # reasoning_effort: 控制推理模型的思维链预算，provider 相关。
+        #   实测（百炼 / qwen3.8-flash，问题「用一句话说明什么是 CAP 定理」）：
+        #     不传        -> out=79, reasoning=41
+        #     "none"      -> out=39, reasoning=0   ← 完全关闭，成本降 51%
+        #     "low"       -> out=95, reasoning=53  ← 注意：反而更贵，别想当然
+        #   两个重要的实测事实：
+        #     1) max_tokens 不限制思维链。实测 max_tokens=4 时仍生成 347 个
+        #        reasoning token。所以「设 max_tokens 就有预算护栏」对推理模型是错的。
+        #     2) 关闭思维链的正确写法是 reasoning_effort 或
+        #        extra_body={"enable_thinking": False}；
+        #        直接传 enable_thinking=False 会被 SDK 拒绝。
         **extra: Any,
     ) -> Iterator[StreamChunk]:
         """逐字返回。
@@ -254,6 +282,7 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            reasoning_effort=reasoning_effort,
             **extra,
         )
         if include_usage:
@@ -308,6 +337,9 @@ class LLMClient:
         provider: Provider | None = None,
         temperature: float = 0.2,
         max_tokens: int | None = None,
+        # 视觉任务同样会产生思维链。实测一张 900x560 的图做 JSON 抽取，
+        # 输出 487 token —— 其中相当一部分是思维链，属于纯浪费。
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> ChatResult:
         client, model, _ = self._resolve(provider, vision=True)
         messages: list[Message] = [
@@ -325,6 +357,7 @@ class LLMClient:
             messages=_to_sdk_messages(messages),
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
         )
         latency_ms = (time.perf_counter() - started) * 1000
         choice = resp.choices[0]
