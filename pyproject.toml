@@ -9,6 +9,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "openai>=1.60",          # 用 OpenAI 兼容协议统一访问百炼 + 方舟
+    "openai-agents>=0.23",   # Agents SDK：用作"框架版"实现，与 D3 手写循环做对比
     "pydantic>=2.9",         # 数据校验（D2 结构化输出的地基）
     "pydantic-settings>=2.5",# 从环境变量读配置
     "python-dotenv>=1.0",
